@@ -361,6 +361,22 @@ input, select, textarea{ font-family:inherit; }
 .event-chip .chip-time{ color:var(--text-muted); font-weight:600; font-size:10.5px; flex:none; }
 .event-chip .chip-name{ overflow:hidden; text-overflow:ellipsis; }
 
+/* Multi-day event bar: a plain-colored chip per day cell, with the edges
+   that continue into a neighboring day squared off and bled into that
+   cell's own padding so the segments visually connect across the grid. */
+.event-chip-bar{ border-left:none; font-weight:600; }
+.event-chip.chip-continues-prev{
+  margin-left:-6px;
+  padding-left:7px;
+  border-top-left-radius:0;
+  border-bottom-left-radius:0;
+}
+.event-chip.chip-continues-next{
+  margin-right:-6px;
+  border-top-right-radius:0;
+  border-bottom-right-radius:0;
+}
+
 .more-link{
   font-size:11px;
   font-weight:700;
@@ -974,12 +990,12 @@ const CONFIG = {
    and MUST be replaced or the calendar cannot save/load data.
    ============================================================================ */
 const FIREBASE_CONFIG = {
-  apiKey: "AIzaSyCJ2nSprYvXUGsoh1CX6B7kOYLqo9QVwwM",
-  authDomain: "rigel-mobilecalendar.firebaseapp.com",
-  projectId: "rigel-mobilecalendar",
-  storageBucket: "rigel-mobilecalendar.firebasestorage.app",
+  apiKey:            "AIzaSyCJ2nSprYvXUGsoh1CX6B7kOYLqo9QVwwM",
+  authDomain:        "rigel-mobilecalendar.firebaseapp.com",
+  projectId:         "rigel-mobilecalendar",
+  storageBucket:     "rigel-mobilecalendar.firebasestorage.app",
   messagingSenderId: "985973453894",
-  appId: "1:985973453894:web:ae22a9eeb8de2f8ac6c647"
+  appId:             "1:985973453894:web:ae22a9eeb8de2f8ac6c647"
 };
 
 // Firestore collection that all calendar data lives in.
@@ -1049,6 +1065,21 @@ const Util = {
   },
   formatTimeRange(start, end){
     return `${Util.formatTimeShort(start)} – ${Util.formatTimeShort(end)}`;
+  },
+
+  // Human-readable span like "2h 30m", "1 day 4h", used once start/end are
+  // both explicit (replaces the old preset-duration lookup).
+  formatDurationLabel(start, end){
+    const totalMin = Math.round((end - start) / 60000);
+    if (totalMin <= 0) return "0 min";
+    const days = Math.floor(totalMin / 1440);
+    const hours = Math.floor((totalMin % 1440) / 60);
+    const mins = totalMin % 60;
+    const parts = [];
+    if (days) parts.push(`${days} day${days > 1 ? "s" : ""}`);
+    if (hours) parts.push(`${hours}h`);
+    if (mins) parts.push(`${mins}m`);
+    return parts.join(" ") || "0 min";
   },
 
   formatBytes(bytes){
@@ -1215,9 +1246,13 @@ const State = {
   setView(view){ State.currentView = view; State.notify(); },
   setDate(d){ State.currentDate = d; State.notify(); },
 
+  // Returns every event that OVERLAPS this calendar day at all — not just
+  // ones that start on it — so multi-day events appear on every day they span.
   eventsForDay(day){
+    const dayStart = new Date(day.getFullYear(), day.getMonth(), day.getDate(), 0, 0, 0, 0);
+    const dayEnd = new Date(day.getFullYear(), day.getMonth(), day.getDate(), 23, 59, 59, 999);
     return State.index
-      .filter(e => Util.isSameDay(new Date(e.start), day))
+      .filter(e => new Date(e.start) <= dayEnd && new Date(e.end) >= dayStart)
       .sort((a,b) => new Date(a.start) - new Date(b.start));
   },
 
@@ -1543,7 +1578,7 @@ const MonthView = {
           <div class="date-num ${isToday ? "is-today" : ""}" data-goto-day="${day.toISOString()}">${day.getDate()}</div>
         </div>
         <div class="event-list">
-          ${visible.map(ev => MonthView.chipHtml(ev)).join("")}
+          ${visible.map(ev => MonthView.chipHtml(ev, day)).join("")}
           ${overflowCount > 0 ? `<div class="more-link" data-agenda-day="${day.toISOString()}">+${overflowCount} more</div>` : ""}
         </div>
       `;
@@ -1575,13 +1610,39 @@ const MonthView = {
     });
   },
 
-  chipHtml(ev){
+  /** Renders one event's segment within a single day cell. Multi-day events
+   *  get a borderless "bar" segment that bleeds into the cell's own padding
+   *  on whichever sides continue into a neighboring day, so adjacent day
+   *  cells read as one continuous stretched bar from start day to end day. */
+  chipHtml(ev, day){
     const color = Util.colorForTag(ev.colorTag);
     const start = new Date(ev.start);
+    const end = new Date(ev.end);
+    const isMultiDay = !Util.isSameDay(start, end);
+
+    if (!isMultiDay){
+      return `
+        <div class="event-chip" data-event-id="${ev.id}" style="border-left-color:${color}">
+          <span class="chip-time">${Util.formatTimeShort(start)}</span>
+          <span class="chip-name">${Util.escapeHtml(ev.name)}</span>
+        </div>
+      `;
+    }
+
+    const isStart = Util.isSameDay(day, start);
+    const isEnd = Util.isSameDay(day, end);
+    const posClass = [
+      !isStart ? "chip-continues-prev" : "",
+      !isEnd ? "chip-continues-next" : ""
+    ].filter(Boolean).join(" ");
+
+    let label = ev.name;
+    if (isStart) label = `${Util.formatTimeShort(start)} · ${ev.name}`;
+    else if (isEnd) label = `${ev.name} · until ${Util.formatTimeShort(end)}`;
+
     return `
-      <div class="event-chip" data-event-id="${ev.id}" style="border-left-color:${color}">
-        <span class="chip-time">${Util.formatTimeShort(start)}</span>
-        <span class="chip-name">${Util.escapeHtml(ev.name)}</span>
+      <div class="event-chip event-chip-bar ${posClass}" data-event-id="${ev.id}" style="background:color-mix(in srgb, ${color} 26%, white);">
+        <span class="chip-name">${Util.escapeHtml(label)}</span>
       </div>
     `;
   }
@@ -1647,13 +1708,22 @@ const TimeGridView = {
       }
 
       const dayEvents = State.eventsForDay(day);
+      const colDayStart = DateEngine.startOfDay(day);
+      const colDayEnd = Util.addMinutes(colDayStart, 1440);
+
       dayEvents.forEach(ev => {
         const start = new Date(ev.start);
         const end = new Date(ev.end);
-        const startMin = Util.clamp(start.getHours()*60 + start.getMinutes(), 0, 1440);
-        let endMin = end.getHours()*60 + end.getMinutes();
-        if (end <= start || (!Util.isSameDay(end,start) && endMin < startMin)) endMin = 1440;
-        endMin = Util.clamp(endMin, startMin+20, 1440);
+
+        // Clip the event to just the portion that falls within THIS day
+        // column — full 00:00–24:00 for days strictly in the middle of a
+        // multi-day span, partial for the actual start/end day.
+        const segStart = start < colDayStart ? colDayStart : start;
+        const segEnd = end > colDayEnd ? colDayEnd : end;
+
+        const startMin = Util.clamp((segStart - colDayStart) / 60000, 0, 1440);
+        let endMin = Util.clamp((segEnd - colDayStart) / 60000, 0, 1440);
+        if (endMin <= startMin) endMin = Math.min(1440, startMin + 20);
 
         const block = document.createElement("div");
         block.className = "time-event";
@@ -1661,7 +1731,8 @@ const TimeGridView = {
         block.style.top = (startMin/60 * CONFIG.HOUR_HEIGHT_PX) + "px";
         block.style.height = Math.max(22, (endMin-startMin)/60 * CONFIG.HOUR_HEIGHT_PX - 2) + "px";
         block.style.background = Util.colorForTag(ev.colorTag);
-        block.innerHTML = `<span class="te-name">${Util.escapeHtml(ev.name)}</span><span class="te-time">${Util.formatTimeShort(start)}</span>`;
+        const timeLabel = Util.isSameDay(day, start) ? Util.formatTimeShort(start) : "";
+        block.innerHTML = `<span class="te-name">${Util.escapeHtml(ev.name)}</span>${timeLabel ? `<span class="te-time">${timeLabel}</span>` : ""}`;
         block.addEventListener("click", (e) => { e.stopPropagation(); Popover.open(ev.id, block); });
         col.appendChild(block);
       });
@@ -1904,9 +1975,6 @@ const EventModal = {
     scrim.className = "modal-scrim";
     EventModal._scrimEl = scrim;
 
-    const presetMatch = CONFIG.DURATION_PRESETS.find(p => p.label === ev.durationLabel);
-    const isCustomDuration = !presetMatch;
-
     scrim.innerHTML = `
       <div class="modal">
         <div class="modal-header">
@@ -1927,28 +1995,26 @@ const EventModal = {
 
           <div class="field-row">
             <div class="field">
-              <label for="emDate">Date</label>
-              <input type="date" id="emDate" value="${Util.toDateInputValue(start)}" />
+              <label for="emStartDate">Start date</label>
+              <input type="date" id="emStartDate" value="${Util.toDateInputValue(start)}" />
             </div>
             <div class="field">
-              <label for="emTime">Start time</label>
-              <input type="time" id="emTime" value="${Util.toTimeInputValue(start)}" />
+              <label for="emStartTime">Start time</label>
+              <input type="time" id="emStartTime" value="${Util.toTimeInputValue(start)}" />
             </div>
           </div>
 
-          <div class="field">
-            <label for="emDuration">Event duration</label>
-            <select id="emDuration">
-              ${CONFIG.DURATION_PRESETS.map(p => `<option value="${p.label}" ${(!isCustomDuration && p.label===ev.durationLabel) ? "selected" : ""}>${p.label}</option>`).join("")}
-            </select>
-            <div class="duration-custom-row" id="emCustomRow" style="display:${isCustomDuration ? "flex":"none"};">
-              <input type="number" min="1" id="emCustomValue" placeholder="Amount" value="${isCustomDuration ? (parseInt(ev.durationLabel)||1) : 1}" />
-              <select id="emCustomUnit">
-                ${CONFIG.CUSTOM_DURATION_UNITS.map(u => `<option value="${u.label}" ${isCustomDuration && ev.durationLabel && ev.durationLabel.includes(u.label) ? "selected":""}>${u.label}</option>`).join("")}
-              </select>
+          <div class="field-row">
+            <div class="field">
+              <label for="emEndDate">End date</label>
+              <input type="date" id="emEndDate" value="${Util.toDateInputValue(end)}" />
             </div>
-            <div class="field-hint">Pick a preset, or choose "Custom…" to type your own amount.</div>
+            <div class="field">
+              <label for="emEndTime">End time</label>
+              <input type="time" id="emEndTime" value="${Util.toTimeInputValue(end)}" />
+            </div>
           </div>
+          <div class="field-hint">Spanning multiple days is fine — pick any end date after the start date.</div>
 
           <div class="field">
             <div class="computed-end" id="emComputedEnd"></div>
@@ -1995,11 +2061,10 @@ const EventModal = {
     document.getElementById("emClose").addEventListener("click", EventModal.close);
     document.getElementById("emCancel").addEventListener("click", EventModal.close);
 
-    EventModal._wireDuration();
     EventModal._wireColorRow();
     EventModal._wireUploads();
     EventModal._renderThumbs();
-    EventModal._recomputeEnd();
+    EventModal._recomputeDuration();
 
     if (isEdit){
       document.getElementById("emDelete").addEventListener("click", () => {
@@ -2022,19 +2087,10 @@ const EventModal = {
 
     document.getElementById("emSave").addEventListener("click", () => EventModal._handleSave(ev.id));
 
-    // live recompute end time as fields change
-    ["emDate","emTime","emDuration","emCustomValue","emCustomUnit"].forEach(id => {
-      document.getElementById(id).addEventListener("input", EventModal._recomputeEnd);
-      document.getElementById(id).addEventListener("change", EventModal._recomputeEnd);
-    });
-  },
-
-  _wireDuration(){
-    const sel = document.getElementById("emDuration");
-    sel.addEventListener("change", () => {
-      const preset = CONFIG.DURATION_PRESETS.find(p => p.label === sel.value);
-      document.getElementById("emCustomRow").style.display = (preset && preset.minutes === null) ? "flex" : "none";
-      EventModal._recomputeEnd();
+    // live recompute duration / validity as fields change
+    ["emStartDate","emStartTime","emEndDate","emEndTime"].forEach(id => {
+      document.getElementById(id).addEventListener("input", EventModal._recomputeDuration);
+      document.getElementById(id).addEventListener("change", EventModal._recomputeDuration);
     });
   },
 
@@ -2047,26 +2103,37 @@ const EventModal = {
     });
   },
 
-  _currentDurationMinutes(){
-    const sel = document.getElementById("emDuration");
-    const preset = CONFIG.DURATION_PRESETS.find(p => p.label === sel.value);
-    if (preset && preset.minutes !== null) return { minutes: preset.minutes, label: preset.label };
-    const amount = Math.max(1, parseInt(document.getElementById("emCustomValue").value, 10) || 1);
-    const unitLabel = document.getElementById("emCustomUnit").value;
-    const unit = CONFIG.CUSTOM_DURATION_UNITS.find(u => u.label === unitLabel) || CONFIG.CUSTOM_DURATION_UNITS[0];
-    return { minutes: amount * unit.mult, label: `${amount} ${unit.label}` };
+  /** Reads the four start/end inputs, if both are valid. Returns null if
+   *  either field is incomplete (e.g. mid-typing). */
+  _readRange(){
+    const sDate = document.getElementById("emStartDate").value;
+    const sTime = document.getElementById("emStartTime").value;
+    const eDate = document.getElementById("emEndDate").value;
+    const eTime = document.getElementById("emEndTime").value;
+    if (!sDate || !sTime || !eDate || !eTime) return null;
+    return {
+      start: Util.parseDateTimeInputs(sDate, sTime),
+      end: Util.parseDateTimeInputs(eDate, eTime)
+    };
   },
 
-  _recomputeEnd(){
-    const dateVal = document.getElementById("emDate").value;
-    const timeVal = document.getElementById("emTime").value;
-    if (!dateVal || !timeVal) return;
-    const start = Util.parseDateTimeInputs(dateVal, timeVal);
-    const { minutes, label } = EventModal._currentDurationMinutes();
-    const end = Util.addMinutes(start, minutes);
-    document.getElementById("emComputedEnd").innerHTML = `
+  _recomputeDuration(){
+    const range = EventModal._readRange();
+    const box = document.getElementById("emComputedEnd");
+    const saveBtn = document.getElementById("emSave");
+    if (!range || !box) return;
+
+    if (range.end <= range.start){
+      box.innerHTML = `<span style="color:var(--danger)">End must be after the start.</span>`;
+      if (saveBtn) saveBtn.disabled = true;
+      return;
+    }
+    if (saveBtn) saveBtn.disabled = false;
+
+    const label = Util.formatDurationLabel(range.start, range.end);
+    box.innerHTML = `
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 15"/></svg>
-      Ends ${Util.formatDayLabel(end)} at ${Util.formatTimeShort(end)} <span style="opacity:.6">(${label})</span>
+      Ends ${Util.formatDayLabel(range.end)} at ${Util.formatTimeShort(range.end)} <span style="opacity:.6">(${label})</span>
     `;
   },
 
@@ -2130,11 +2197,11 @@ const EventModal = {
     const name = document.getElementById("emName").value.trim();
     if (!name){ Toast.show("Give this upload a name first.", "error"); return; }
 
-    const dateVal = document.getElementById("emDate").value;
-    const timeVal = document.getElementById("emTime").value;
-    const start = Util.parseDateTimeInputs(dateVal, timeVal);
-    const { minutes, label } = EventModal._currentDurationMinutes();
-    const end = Util.addMinutes(start, minutes);
+    const range = EventModal._readRange();
+    if (!range){ Toast.show("Please set both a start and an end date/time.", "error"); return; }
+    const { start, end } = range;
+    if (end <= start){ Toast.show("End date/time must be after the start.", "error"); return; }
+    const label = Util.formatDurationLabel(start, end);
     const colorSwatch = document.querySelector("#emColorRow .color-swatch.selected");
     const colorTag = colorSwatch ? colorSwatch.dataset.colorId : "navy";
     const detail = document.getElementById("emDetail").value;
